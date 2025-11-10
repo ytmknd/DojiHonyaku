@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8" />
+<title>Frontend-only Simul-Translate (PoC)</title>
+<style>
+  body{font:14px/1.6 system-ui, sans-serif; max-width:800px; margin:40px auto; padding:0 16px;}
+  .row{display:grid; grid-template-columns:120px 1fr; gap:8px; align-items:center}
+  .bubble{padding:10px 12px; border-radius:12px; background:#f5f5f7; margin:6px 0; white-space:pre-wrap}
+  .bubble.out{background:#e8f0fe}
+  .bubble.tts{background:#fffbe6; border:1px solid #f3d36b}
+  button{padding:8px 14px; border-radius:10px; border:1px solid #ccc; background:#fff; cursor:pointer}
+  .small{opacity:.7; font-size:12px}
+</style>
+<body>
+  <h1>フロントエンドだけで同時翻訳（PoC）</h1>
+
+  <div class="row">
+    <label>入力言語:</label>
+    <select id="srcLang">
+      <option value="ja-JP">日本語 (ja-JP)</option>
+      <option value="en-US">English (en-US)</option>
+    </select>
+  </div>
+  <div class="row">
+    <label>出力言語:</label>
+    <select id="tgtLang">
+      <option value="en">English</option>
+      <option value="ja">日本語</option>
+    </select>
+  </div>
+  <div class="row">
+    <label>Gemini API Key:</label>
+    <input id="apiKey" type="password" placeholder="AIza..." style="width:100%" />
+  </div>
+  <p class="small">※ AI StudioのAPIキーは<strong>必ずリファラ制限</strong>を設定してください。本番はサーバ側で隠すのが原則です。</p>
+
+  <p>
+    <button id="btn">🎙️ 音声入力開始</button>
+    <label><input type="checkbox" id="tts" checked> 訳文を読み上げる</label>
+  </p>
+
+  <div id="orig" class="bubble"></div>
+  <div id="tran" class="bubble out"></div>
+  <div id="spoken" class="bubble tts" style="display:none"></div>
+
+<script>
+const btn = document.getElementById('btn');
+const orig = document.getElementById('orig');
+const tran = document.getElementById('tran');
+const spoken = document.getElementById('spoken');
+const srcLang = document.getElementById('srcLang');
+const tgtLang = document.getElementById('tgtLang');
+const apiKeyInput = document.getElementById('apiKey');
+const ttsOn = document.getElementById('tts');
+
+let recog, running = false, partial = '';
+let ttsProgressTimer = null; // TTS進行の擬似ハイライト用
+let origText = ''; // 原文累積用
+let tranText = ''; // 訳文累積用
+
+function ensureRecognition(lang) {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { alert('このブラウザは Web Speech API (SpeechRecognition) をサポートしていません。Chromeをお試しください。'); return null; }
+  const r = new SR();
+  r.lang = lang;
+  r.interimResults = true;
+  r.continuous = true;
+  return r;
+}
+
+btn.onclick = () => {
+  if (!running) start(); else stop();
+};
+
+function start() {
+  const key = apiKeyInput.value.trim();
+  if (!key) { alert('Gemini APIキーを入力してください'); return; }
+
+  recog = ensureRecognition(srcLang.value);
+  if (!recog) return;
+
+  running = true;
+  btn.textContent = '⏹️ 停止';
+  orig.textContent = ''; tran.textContent = '';
+  origText = ''; tranText = ''; // 累積バッファリセット
+
+  recog.onresult = async (ev) => {
+    let finalChunk = '';
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      const res = ev.results[i];
+      const txt = res[0].transcript;
+      if (res.isFinal) {
+        finalChunk += txt;
+      } else {
+        partial = txt;
+      }
+    }
+    // 画面の字幕更新
+    if (finalChunk) {
+      origText += finalChunk + '\n';
+    }
+    orig.textContent = origText + (partial ? ('…' + partial) : '');
+
+    // finalが出たら翻訳を叩く（短文単位）
+    if (finalChunk) {
+      console.log('[翻訳リクエスト] 原文:', finalChunk);
+      const translated = await translateWithGemini(finalChunk, tgtLang.value, apiKeyInput.value);
+      console.log('[翻訳結果]', translated || '(空)');
+      if (translated) {
+        tranText += translated + '\n';
+        tran.textContent = tranText;
+        if (ttsOn.checked) speak(translated, tgtLang.value);
+      }
+      partial = '';
+    }
+  };
+
+  recog.onerror = (e) => console.warn('STT error', e);
+  recog.onend = () => { if (running) recog.start(); }; // 自動再開
+  recog.start();
+}
+
+function stop() {
+  running = false;
+  btn.textContent = '🎙️ 音声入力開始';
+  try { recog && recog.stop(); } catch {}
+}
+
+// Gemini APIで翻訳（超簡易プロンプト）
+async function translateWithGemini(text, targetLang, apiKey) {
+  const model = 'gemini-1.5-flash-latest';
+  const prompt = `次の文を${targetLang}に自然に翻訳してください。固有名詞は原文を優先し、意味が曖昧なら簡潔に言い換えてください。\n原文: """${text}"""`;
+
+  try {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }]}] })
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error('[翻訳API失敗]', res.status, errText);
+      throw new Error(errText);
+    }
+    const data = await res.json();
+    const out = data?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') ?? '';
+    return out.trim();
+  } catch (e) {
+    console.error('[翻訳エラー]', e);
+    return '';
+  }
+}
+
+// ブラウザTTS
+function speak(text, langCode) {
+  try {
+    const u = new SpeechSynthesisUtterance(text);
+    // 言語を推定設定（en/jaなど）
+    u.lang = (langCode === 'ja') ? 'ja-JP' : (langCode === 'en' ? 'en-US' : langCode);
+
+    // 表示エリア更新（読み上げ中の訳文）
+    spoken.style.display = 'block';
+    spoken.textContent = text;
+    spoken.dataset.full = text; // 保持
+    spoken.title = '現在読み上げ中の訳文';
+
+    // 途中経過ハイライト（ブラウザによって boundary が来ない場合あり）
+    const full = spoken.dataset.full || text;
+    const setHighlight = (idx) => {
+      const ci = Math.max(0, Math.min(full.length, idx|0));
+      const shown = full.slice(0, ci);
+      const rest = full.slice(ci);
+      spoken.innerHTML = '<strong>' + escapeHTML(shown) + '</strong>' + escapeHTML(rest);
+    };
+
+    const clearTimer = () => {
+      if (ttsProgressTimer) { clearInterval(ttsProgressTimer); ttsProgressTimer = null; }
+    };
+
+    let boundarySeen = false;
+    let startTs = 0;
+
+    u.onboundary = (e) => {
+      boundarySeen = true;
+      if (typeof e.charIndex === 'number') {
+        setHighlight(e.charIndex);
+      }
+    };
+    u.onstart = () => {
+      spoken.style.opacity = 1;
+      startTs = performance.now();
+      // Chrome/Windows等で boundary が来ない場合のフォールバック
+      setTimeout(() => {
+        if (!boundarySeen && !ttsProgressTimer) {
+          // 言語ごとの概算: ja ~7cps, en ~12cps をベースに rate を乗算
+          const baseCps = (u.lang && u.lang.startsWith('ja')) ? 7 : 12;
+          const cps = baseCps * (u.rate || 1);
+          clearTimer();
+          ttsProgressTimer = setInterval(() => {
+            const elapsed = (performance.now() - startTs) / 1000;
+            const idx = Math.floor(elapsed * cps);
+            if (idx >= full.length) {
+              setHighlight(full.length);
+              clearTimer();
+            } else {
+              setHighlight(idx);
+            }
+          }, 60);
+        }
+      }, 300);
+    };
+    u.onend = () => {
+      clearTimer();
+      // 読み上げ終了後グレーアウト
+      spoken.innerHTML = escapeHTML(full);
+      spoken.style.opacity = .7;
+      setTimeout(() => { spoken.style.opacity = 1; }, 800);
+    };
+
+    speechSynthesis.cancel();
+    // 直前の擬似進行タイマーも停止
+    if (ttsProgressTimer) { clearInterval(ttsProgressTimer); ttsProgressTimer = null; }
+    speechSynthesis.speak(u);
+  } catch {}
+}
+
+// 安全なHTMLエスケープ
+function escapeHTML(s){
+  return s.replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+}
+
+// TTS表示のON/OFFに合わせて表示切替
+ttsOn.addEventListener('change', () => {
+  if (!ttsOn.checked) {
+    spoken.style.display = 'none';
+  } else if (spoken.dataset.full) {
+    spoken.style.display = 'block';
+  }
+});
+</script>
+</body>
+</html>
