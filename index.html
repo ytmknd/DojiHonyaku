@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="ja">
 <meta charset="utf-8" />
-<title>Frontend-only Simul-Translate (PoC)</title>
+<title>同時翻訳</title>
 <style>
   body{font:14px/1.6 system-ui, sans-serif; max-width:800px; margin:40px auto; padding:0 16px;}
   .row{display:grid; grid-template-columns:120px 1fr; gap:8px; align-items:center}
@@ -12,8 +12,15 @@
   .small{opacity:.7; font-size:12px}
 </style>
 <body>
-  <h1>フロントエンドだけで同時翻訳（PoC）</h1>
+  <h1>同時翻訳</h1>
 
+  <div class="row">
+    <label>入力ソース:</label>
+    <select id="inputSource">
+      <option value="microphone">マイク</option>
+      <option value="text">テキスト入力</option>
+    </select>
+  </div>
   <div class="row">
     <label>入力言語:</label>
     <select id="srcLang">
@@ -32,7 +39,23 @@
     <label>Gemini API Key:</label>
     <input id="apiKey" type="password" placeholder="AIza..." style="width:100%" />
   </div>
+  <div class="row">
+    <label>モデル優先:</label>
+    <select id="modelPref">
+      <option value="speed" selected>速度優先 (flash)</option>
+      <option value="quality">精度優先 (pro)</option>
+    </select>
+  </div>
+  <div class="row">
+    <label>使用モデル:</label>
+    <div id="modelInfo" class="small" style="min-height:18px">未選択</div>
+  </div>
   <p class="small">※ AI StudioのAPIキーは<strong>必ずリファラ制限</strong>を設定してください。本番はサーバ側で隠すのが原則です。</p>
+
+  <div id="textInputArea" style="display:none; margin-bottom:16px;">
+    <textarea id="textInput" placeholder="翻訳したいテキストを入力してください" style="width:100%; min-height:100px; padding:8px; border-radius:8px; border:1px solid #ccc;"></textarea>
+    <button id="translateBtn" style="margin-top:8px;">翻訳する</button>
+  </div>
 
   <p>
     <button id="btn">🎙️ 音声入力開始</button>
@@ -41,22 +64,66 @@
 
   <div id="orig" class="bubble"></div>
   <div id="tran" class="bubble out"></div>
-  <div id="spoken" class="bubble tts" style="display:none"></div>
+  <!-- spokenエリア削除: 音声読み上げの視覚的進行表示は廃止 -->
 
 <script>
 const btn = document.getElementById('btn');
 const orig = document.getElementById('orig');
 const tran = document.getElementById('tran');
-const spoken = document.getElementById('spoken');
+// spokenエリア削除に伴いDOM参照を除去
 const srcLang = document.getElementById('srcLang');
 const tgtLang = document.getElementById('tgtLang');
 const apiKeyInput = document.getElementById('apiKey');
 const ttsOn = document.getElementById('tts');
+const inputSource = document.getElementById('inputSource');
+const textInputArea = document.getElementById('textInputArea');
+const textInput = document.getElementById('textInput');
+const translateBtn = document.getElementById('translateBtn');
+const modelPref = document.getElementById('modelPref');
+const modelInfo = document.getElementById('modelInfo');
 
 let recog, running = false, partial = '';
 let ttsProgressTimer = null; // TTS進行の擬似ハイライト用
 let origText = ''; // 原文累積用
 let tranText = ''; // 訳文累積用
+
+// 入力ソース切り替え
+inputSource.addEventListener('change', () => {
+  if (inputSource.value === 'text') {
+    textInputArea.style.display = 'block';
+    btn.style.display = 'none';
+  } else {
+    textInputArea.style.display = 'none';
+    btn.style.display = 'inline-block';
+  }
+});
+
+// テキスト入力の翻訳ボタン
+translateBtn.onclick = async () => {
+  const key = apiKeyInput.value.trim();
+  if (!key) { alert('Gemini APIキーを入力してください'); return; }
+  
+  const text = textInput.value.trim();
+  if (!text) { alert('翻訳するテキストを入力してください'); return; }
+  
+  // finalChunk検出時と同じ処理
+  const finalChunk = text;
+  
+  origText += finalChunk + '\n';
+  orig.textContent = origText;
+  
+  console.log('[翻訳リクエスト] 原文:', finalChunk);
+  const translated = await translateWithGemini(finalChunk, tgtLang.value, apiKeyInput.value);
+  console.log('[翻訳結果]', translated || '(空)');
+  if (translated) {
+    tranText += translated + '\n';
+    tran.textContent = tranText;
+    if (ttsOn.checked) speak(translated, tgtLang.value);
+  }
+  
+  // 翻訳後、テキストエリアをクリア
+  textInput.value = '';
+};
 
 function ensureRecognition(lang) {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -120,106 +187,166 @@ function start() {
   recog.start();
 }
 
-function stop() {
+async function stop() {
   running = false;
   btn.textContent = '🎙️ 音声入力開始';
   try { recog && recog.stop(); } catch {}
-}
-
-// Gemini APIで翻訳（超簡易プロンプト）
-async function translateWithGemini(text, targetLang, apiKey) {
-  const model = 'gemini-1.5-flash-latest';
-  const prompt = `次の文を${targetLang}に自然に翻訳してください。固有名詞は原文を優先し、意味が曖昧なら簡潔に言い換えてください。\n原文: """${text}"""`;
-
-  try {
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }]}] })
-    });
-    if (!res.ok) {
-      const errText = await res.text();
-      console.error('[翻訳API失敗]', res.status, errText);
-      throw new Error(errText);
+  
+  // 停止時に残っているpartialテキストがあれば翻訳する
+  if (partial) {
+    const finalChunk = partial;
+    partial = '';
+    
+    origText += finalChunk + '\n';
+    orig.textContent = origText;
+    
+    console.log('[翻訳リクエスト] 原文:', finalChunk);
+    const translated = await translateWithGemini(finalChunk, tgtLang.value, apiKeyInput.value);
+    console.log('[翻訳結果]', translated || '(空)');
+    if (translated) {
+      tranText += translated + '\n';
+      tran.textContent = tranText;
+      if (ttsOn.checked) speak(translated, tgtLang.value);
     }
-    const data = await res.json();
-    const out = data?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') ?? '';
-    return out.trim();
-  } catch (e) {
-    console.error('[翻訳エラー]', e);
-    return '';
   }
 }
 
+// ===== Gemini API 翻訳（モデル自動検出 + v1/v1beta フォールバック） =====
+// 利用安定度を考慮して 2.x 実験系は除外（400/404頻発回避）
+const PREFERRED_MODELS = [
+  'gemini-1.5-flash',
+  'gemini-1.5-flash-001',
+  'gemini-1.5-pro',
+  'gemini-pro'
+];
+let activeModel = null;      // 例: 'gemini-1.5-flash'
+let activeApiVersion = null; // 'v1' | 'v1beta'
+let modelPreference = 'speed'; // 'speed' | 'quality'
+
+async function listModels(version, apiKey) {
+  const url = `https://generativelanguage.googleapis.com/${version}/models?key=${encodeURIComponent(apiKey)}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`${version}: ${res.status} ${t.slice(0,160)}`);
+  }
+  return res.json();
+}
+
+function pickBestModel(models) {
+  // models[i].name は 'models/gemini-xxx' 形式
+  const candidates = models
+    .filter(m => Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes('generateContent'))
+    .map(m => (m.name || '').replace(/^models\//, ''))
+    .filter(n => n && !/vision|embed|embedding|exp|experimental|2\./i.test(n)); // 2.x と experimental を除外
+
+  if (!candidates.length) return null;
+  // 動的優先順位作成
+  let ordered;
+  if (modelPreference === 'quality') {
+    // 精度優先: pro -> flash
+    ordered = [
+      'gemini-1.5-pro','gemini-pro','gemini-1.5-flash','gemini-1.5-flash-001'
+    ];
+  } else {
+    // 速度優先: flash -> pro
+    ordered = [
+      'gemini-1.5-flash','gemini-1.5-flash-001','gemini-1.5-pro','gemini-pro'
+    ];
+  }
+  for (const name of ordered) {
+    if (candidates.includes(name)) return name;
+  }
+  // fallback: flash系 or 最初
+  const flash = candidates.find(n => /flash/i.test(n));
+  return flash || candidates[0];
+}
+
+async function ensureModel(apiKey) {
+  if (activeModel && activeApiVersion) return { model: activeModel, version: activeApiVersion };
+  const errors = [];
+  for (const version of ['v1', 'v1beta']) {
+    try {
+      const data = await listModels(version, apiKey);
+      const model = pickBestModel(data.models || []);
+      if (model) {
+        activeModel = model;
+        activeApiVersion = version;
+  modelInfo.textContent = `${model} (${version})`;
+        return { model, version };
+      } else {
+        errors.push(`${version}: 適合モデルなし`);
+      }
+    } catch (e) {
+      errors.push(e.message);
+    }
+  }
+  throw new Error('モデル一覧の取得に失敗しました\n' + errors.join('\n'));
+}
+
+async function translateWithGemini(text, targetLang, apiKey) {
+  // 出力に日本語の注釈や候補列挙を含めないよう厳格に指示するプロンプト
+  const langLabel = (targetLang === 'en') ? '英語' : (targetLang === 'ja' ? '日本語' : targetLang);
+  const prompt = `以下の原文を${langLabel}に自然で簡潔に翻訳してください。\n厳守事項:\n- 出力は翻訳結果本文のみ。一切の注釈、補足説明、日本語での解説、候補の列挙、括弧内コメント、例示、語尾バリエーション提示を含めない。\n- 複数案が考えられても最も自然で単一の1案のみを返す。\n- 箇条書き記号(*,-,・など)や余計な引用符/囲み記号を先頭や末尾に付けない。\n- 原文の意味保持を優先しつつ冗長さは避ける。\n原文: """${text}"""`;
+
+  const errors = [];
+  // 最大2回の試行: 1回目は ensureModel が選んだ version/model、失敗したらキャッシュ破棄して逆の version を試す
+  for (let attempt = 0; attempt < 4; attempt++) { // 余分に最大4試行 (v1/v1beta * 複数モデル再検出)
+    try {
+      const { model, version } = await ensureModel(apiKey);
+      const url = `https://generativelanguage.googleapis.com/${version}/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  modelInfo.textContent = `${model} (${version})`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }]}],
+          generationConfig: { response_mime_type: 'text/plain' }
+        })
+      });
+      if (!res.ok) {
+        const errText = await res.text();
+        errors.push(`${version}/${model}: ${res.status} ${errText.slice(0,160)}`);
+        // 400/404 はモデル非対応 or 権限不足の可能性 → キャッシュ破棄して再検出
+        activeModel = null; activeApiVersion = null;
+        modelInfo.textContent = '再検出中…';
+        continue;
+      }
+      const data = await res.json();
+      const out = data?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') ?? '';
+      const trimmed = out.trim();
+      if (trimmed) return trimmed;
+      errors.push(`${version}/${model}: 応答空`);
+      activeModel = null; activeApiVersion = null;
+      modelInfo.textContent = '再検出中…';
+    } catch (e) {
+      errors.push(e.message);
+      activeModel = null; activeApiVersion = null;
+      modelInfo.textContent = '再検出中…';
+    }
+  }
+
+  const msg = '[翻訳エラー] 利用可能なモデルが見つかりませんでした\n' + errors.join('\n');
+  tran.textContent = msg;
+  return '';
+}
+
+// モデル優先度変更
+modelPref.addEventListener('change', () => {
+  modelPreference = modelPref.value;
+  // キャッシュ破棄し再検出させる
+  activeModel = null;
+  activeApiVersion = null;
+  modelInfo.textContent = '未選択 (再検出待ち)';
+});
+
 // ブラウザTTS
 function speak(text, langCode) {
+  // spokenエリア削除後は単純に音声読み上げのみを行う
   try {
     const u = new SpeechSynthesisUtterance(text);
-    // 言語を推定設定（en/jaなど）
     u.lang = (langCode === 'ja') ? 'ja-JP' : (langCode === 'en' ? 'en-US' : langCode);
-
-    // 表示エリア更新（読み上げ中の訳文）
-    spoken.style.display = 'block';
-    spoken.textContent = text;
-    spoken.dataset.full = text; // 保持
-    spoken.title = '現在読み上げ中の訳文';
-
-    // 途中経過ハイライト（ブラウザによって boundary が来ない場合あり）
-    const full = spoken.dataset.full || text;
-    const setHighlight = (idx) => {
-      const ci = Math.max(0, Math.min(full.length, idx|0));
-      const shown = full.slice(0, ci);
-      const rest = full.slice(ci);
-      spoken.innerHTML = '<strong>' + escapeHTML(shown) + '</strong>' + escapeHTML(rest);
-    };
-
-    const clearTimer = () => {
-      if (ttsProgressTimer) { clearInterval(ttsProgressTimer); ttsProgressTimer = null; }
-    };
-
-    let boundarySeen = false;
-    let startTs = 0;
-
-    u.onboundary = (e) => {
-      boundarySeen = true;
-      if (typeof e.charIndex === 'number') {
-        setHighlight(e.charIndex);
-      }
-    };
-    u.onstart = () => {
-      spoken.style.opacity = 1;
-      startTs = performance.now();
-      // Chrome/Windows等で boundary が来ない場合のフォールバック
-      setTimeout(() => {
-        if (!boundarySeen && !ttsProgressTimer) {
-          // 言語ごとの概算: ja ~7cps, en ~12cps をベースに rate を乗算
-          const baseCps = (u.lang && u.lang.startsWith('ja')) ? 7 : 12;
-          const cps = baseCps * (u.rate || 1);
-          clearTimer();
-          ttsProgressTimer = setInterval(() => {
-            const elapsed = (performance.now() - startTs) / 1000;
-            const idx = Math.floor(elapsed * cps);
-            if (idx >= full.length) {
-              setHighlight(full.length);
-              clearTimer();
-            } else {
-              setHighlight(idx);
-            }
-          }, 60);
-        }
-      }, 300);
-    };
-    u.onend = () => {
-      clearTimer();
-      // 読み上げ終了後グレーアウト
-      spoken.innerHTML = escapeHTML(full);
-      spoken.style.opacity = .7;
-      setTimeout(() => { spoken.style.opacity = 1; }, 800);
-    };
-
     speechSynthesis.cancel();
-    // 直前の擬似進行タイマーも停止
-    if (ttsProgressTimer) { clearInterval(ttsProgressTimer); ttsProgressTimer = null; }
     speechSynthesis.speak(u);
   } catch {}
 }
@@ -229,12 +356,10 @@ function escapeHTML(s){
   return s.replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 }
 
-// TTS表示のON/OFFに合わせて表示切替
+// spokenエリア削除につき TTS ON/OFF は読み上げ実行可否のみ（UI表示変更不要）
 ttsOn.addEventListener('change', () => {
   if (!ttsOn.checked) {
-    spoken.style.display = 'none';
-  } else if (spoken.dataset.full) {
-    spoken.style.display = 'block';
+    speechSynthesis.cancel();
   }
 });
 </script>
