@@ -62,6 +62,14 @@
     <label><input type="checkbox" id="tts" checked> 訳文を読み上げる</label>
   </p>
 
+  <div class="row">
+    <label>読み上げ音量:</label>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <input type="range" id="ttsVolume" min="0" max="200" value="100" style="flex:1;">
+      <span id="ttsVolumeLabel" style="min-width:40px;">100%</span>
+    </div>
+  </div>
+
   <div id="orig" class="bubble"></div>
   <div id="tran" class="bubble out"></div>
   <!-- spokenエリア削除: 音声読み上げの視覚的進行表示は廃止 -->
@@ -81,6 +89,8 @@ const textInput = document.getElementById('textInput');
 const translateBtn = document.getElementById('translateBtn');
 const modelPref = document.getElementById('modelPref');
 const modelInfo = document.getElementById('modelInfo');
+const ttsVolume = document.getElementById('ttsVolume');
+const ttsVolumeLabel = document.getElementById('ttsVolumeLabel');
 
 let recog, running = false, partial = '';
 let ttsProgressTimer = null; // TTS進行の擬似ハイライト用
@@ -370,6 +380,9 @@ function speak(text, langCode) {
   try {
     const u = new SpeechSynthesisUtterance(text);
     u.lang = (langCode === 'ja') ? 'ja-JP' : (langCode === 'en' ? 'en-US' : langCode);
+    u.volume = Math.min(ttsVolume.value / 100, 2.0); // 音量を0.0〜2.0の範囲で設定
+    u.rate = 1.0; // 速度（必要に応じて調整可能）
+    u.pitch = 1.0; // ピッチ（必要に応じて調整可能）
     speechSynthesis.cancel();
     speechSynthesis.speak(u);
   } catch {}
@@ -385,6 +398,11 @@ ttsOn.addEventListener('change', () => {
   if (!ttsOn.checked) {
     speechSynthesis.cancel();
   }
+});
+
+// 音量スライダーの変更を反映
+ttsVolume.addEventListener('input', () => {
+  ttsVolumeLabel.textContent = ttsVolume.value + '%';
 });
 
 // ===== Screen Wake Lock API: スリープ防止 =====
