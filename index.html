@@ -86,6 +86,7 @@ let recog, running = false, partial = '';
 let ttsProgressTimer = null; // TTS進行の擬似ハイライト用
 let origText = ''; // 原文累積用
 let tranText = ''; // 訳文累積用
+let wakeLock = null; // Screen Wake Lock API用
 
 // 入力ソース切り替え
 inputSource.addEventListener('change', () => {
@@ -151,6 +152,9 @@ function start() {
   orig.textContent = ''; tran.textContent = '';
   origText = ''; tranText = ''; // 累積バッファリセット
 
+  // Screen Wake Lockを取得してスリープを防止
+  requestWakeLock();
+
   recog.onresult = async (ev) => {
     let finalChunk = '';
     let currentPartial = '';
@@ -200,6 +204,9 @@ async function stop() {
   running = false;
   btn.textContent = '🎙️ 音声入力開始';
   try { recog && recog.stop(); } catch {}
+  
+  // Wake Lockを解放
+  releaseWakeLock();
   
   // 停止時に残っているpartialテキストがあれば翻訳する
   if (partial) {
@@ -369,6 +376,41 @@ function escapeHTML(s){
 ttsOn.addEventListener('change', () => {
   if (!ttsOn.checked) {
     speechSynthesis.cancel();
+  }
+});
+
+// ===== Screen Wake Lock API: スリープ防止 =====
+async function requestWakeLock() {
+  if ('wakeLock' in navigator) {
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      console.log('Wake Lock 取得成功');
+      
+      // 画面が再び表示された時にWake Lockを再取得
+      wakeLock.addEventListener('release', () => {
+        console.log('Wake Lock 解放');
+      });
+    } catch (err) {
+      console.warn('Wake Lock 取得失敗:', err);
+    }
+  }
+}
+
+function releaseWakeLock() {
+  if (wakeLock !== null) {
+    wakeLock.release()
+      .then(() => {
+        wakeLock = null;
+        console.log('Wake Lock 手動解放');
+      })
+      .catch(err => console.warn('Wake Lock 解放エラー:', err));
+  }
+}
+
+// ページが再び表示された時にWake Lockを再取得
+document.addEventListener('visibilitychange', async () => {
+  if (wakeLock !== null && document.visibilityState === 'visible' && running) {
+    await requestWakeLock();
   }
 });
 </script>
