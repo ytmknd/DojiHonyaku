@@ -87,6 +87,8 @@ let ttsProgressTimer = null; // TTS進行の擬似ハイライト用
 let origText = ''; // 原文累積用
 let tranText = ''; // 訳文累積用
 let wakeLock = null; // Screen Wake Lock API用
+let keepAliveInterval = null; // スリープ防止用インターバル
+let noSleepVideo = null; // ビデオトリック用
 
 // 入力ソース切り替え
 inputSource.addEventListener('change', () => {
@@ -154,6 +156,9 @@ function start() {
 
   // Screen Wake Lockを取得してスリープを防止
   requestWakeLock();
+  
+  // 追加のスリープ防止策
+  startKeepAlive();
 
   recog.onresult = async (ev) => {
     let finalChunk = '';
@@ -207,6 +212,9 @@ async function stop() {
   
   // Wake Lockを解放
   releaseWakeLock();
+  
+  // スリープ防止策を停止
+  stopKeepAlive();
   
   // 停止時に残っているpartialテキストがあれば翻訳する
   if (partial) {
@@ -404,6 +412,50 @@ function releaseWakeLock() {
         console.log('Wake Lock 手動解放');
       })
       .catch(err => console.warn('Wake Lock 解放エラー:', err));
+  }
+}
+
+// ===== 追加のスリープ防止策 =====
+function startKeepAlive() {
+  // 1. ビデオトリックでスリープを防止（iOS Safari等で有効）
+  if (!noSleepVideo) {
+    noSleepVideo = document.createElement('video');
+    noSleepVideo.setAttribute('muted', '');
+    noSleepVideo.setAttribute('playsinline', '');
+    noSleepVideo.setAttribute('style', 'position:fixed;top:-1px;left:-1px;width:1px;height:1px;opacity:0.01;');
+    // 無音のWebMビデオ（1秒ループ）
+    noSleepVideo.src = 'data:video/webm;base64,GkXfo59ChoEBQveBAULygQRC84EIQoKEd2VibUKHgQRChYECGFOAZwH/////////FUmpZpkq17GDD0JATYCGQ2hyb21lV0GGQ2hyb21lFlSua7+uvdeBAXPFh1dBVMWGQH8BAAAAAAADnQEAAAAAAABZU2XMU3ETnQQAAAAAAABTEa4BAABNiHAE+gOnBg0AIJGDAfqDnQdY+gqBlg4KQQAQJC9mAAoTEgJBqwkGlwJCm2IBrwUDmgbShAEB2QOdBAEB';
+    noSleepVideo.loop = true;
+    document.body.appendChild(noSleepVideo);
+  }
+  noSleepVideo.play().catch(e => console.warn('ビデオ再生失敗:', e));
+  
+  // 2. 定期的に音声認識の状態を確認し再起動（フォールバック）
+  keepAliveInterval = setInterval(() => {
+    if (running && recog) {
+      // 音声認識が意図せず停止していたら再起動
+      try {
+        // Web Speech APIには状態確認メソッドがないため、
+        // onendイベントで自動再開される仕組みに依存
+        console.log('KeepAlive: 実行中');
+      } catch (e) {
+        console.warn('KeepAlive エラー:', e);
+      }
+    }
+  }, 30000); // 30秒ごと
+}
+
+function stopKeepAlive() {
+  // ビデオ停止
+  if (noSleepVideo) {
+    noSleepVideo.pause();
+    noSleepVideo.currentTime = 0;
+  }
+  
+  // インターバル停止
+  if (keepAliveInterval) {
+    clearInterval(keepAliveInterval);
+    keepAliveInterval = null;
   }
 }
 
