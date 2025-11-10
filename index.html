@@ -153,15 +153,24 @@ function start() {
 
   recog.onresult = async (ev) => {
     let finalChunk = '';
+    let currentPartial = '';
+    
+    // 新しい結果のみを処理（resultIndexから開始）
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
       const res = ev.results[i];
       const txt = res[0].transcript;
       if (res.isFinal) {
         finalChunk += txt;
       } else {
-        partial = txt;
+        currentPartial += txt;
       }
     }
+    
+    // partialを更新
+    if (currentPartial) {
+      partial = currentPartial;
+    }
+    
     // 画面の字幕更新
     if (finalChunk) {
       origText += finalChunk + '\n';
